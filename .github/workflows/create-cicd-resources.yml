@@ -7,8 +7,8 @@ on:
         description: Formulario de Port (JSON)
         required: true
         type: string
-      port_run_id:
-        description: ID de la ejecución en Port
+      port_context:
+        description: Contexto JSON de Port Workflow, incluido el ID de ejecución del nodo
         required: false
         type: string
         default: ""
@@ -20,7 +20,7 @@ jobs:
   create:
     runs-on: ubuntu-latest
     env:
-      PORT_RUN_ID: ${{ inputs.port_run_id }}
+      PORT_WORKFLOW_NODE_RUN_ID: ${{ inputs.port_context != '' && (fromJSON(inputs.port_context).workflow_node_run_id || fromJSON(inputs.port_context).workflowNodeRunId || fromJSON(inputs.port_context).node_run_id || fromJSON(inputs.port_context).nodeRunId || '') || '' }}
       PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
       PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
       PORT_API_URL: ${{ vars.PORT_API_URL }}
@@ -75,9 +75,9 @@ jobs:
             echo "role_arn=arn:aws:iam::${ACCOUNT_ID}:role/${env_name}-deploy"
           } >> "$GITHUB_OUTPUT"
 
-      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-workflow-report@main
         with:
-          message: "⏳ [2/4] Creando repositorio de infraestructura de la aplicación..."
+          log_message: "[2/4] Creando repositorio de infraestructura de la aplicación..."
 
       - name: Repo de infraestructura de la app
         uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/create-from-template@main
@@ -92,9 +92,9 @@ jobs:
              "container_port":"${{ steps.form.outputs.port }}",
              "instance_type":"${{ steps.form.outputs.instance }}"}
 
-      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-workflow-report@main
         with:
-          message: "⏳ [2/4] Creando repositorio de la aplicación (${{ steps.form.outputs.tech }} ${{ steps.form.outputs.ver }})..."
+          log_message: "[2/4] Creando repositorio de la aplicación (${{ steps.form.outputs.tech }} ${{ steps.form.outputs.ver }})..."
 
       - name: Repo de la aplicación
         uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/create-from-template@main
@@ -160,11 +160,11 @@ jobs:
              "status":"repos_created"}
           relations: '{"environment":"${{ steps.form.outputs.env_name }}"}'
 
-      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-workflow-report@main
         with:
-          message: "✅ [2/4] Repos creados: ${{ steps.form.outputs.prefix }}-infra y ${{ steps.form.outputs.prefix }}-app. Siguiente paso: desplegar la infraestructura."
+          log_message: "[2/4] Repos creados: ${{ steps.form.outputs.prefix }}-infra y ${{ steps.form.outputs.prefix }}-app. Siguiente paso: desplegar la infraestructura."
 
       - if: ${{ failure() }}
-        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-workflow-report@main
         with:
-          message: "❌ [2/4] Falló la creación de recursos CI/CD. Ver ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          log_message: "[2/4] Falló la creación de recursos CI/CD. Ver ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
