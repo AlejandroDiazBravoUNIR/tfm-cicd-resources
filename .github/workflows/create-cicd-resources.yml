@@ -1,0 +1,170 @@
+name: AS2 - Crear recursos CI/CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      json_data:
+        description: Formulario de Port (JSON)
+        required: true
+        type: string
+      port_run_id:
+        description: ID de la ejecución en Port
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  create:
+    runs-on: ubuntu-latest
+    env:
+      PORT_RUN_ID: ${{ inputs.port_run_id }}
+      PORT_CLIENT_ID: ${{ secrets.PORT_CLIENT_ID }}
+      PORT_CLIENT_SECRET: ${{ secrets.PORT_CLIENT_SECRET }}
+      PORT_API_URL: ${{ vars.PORT_API_URL }}
+      ORG: ${{ github.repository_owner }}
+    steps:
+      - id: app
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.IDP_APP_ID }}
+          private-key: ${{ secrets.IDP_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
+      - run: echo "GH_TOKEN=${{ steps.app.outputs.token }}" >> "$GITHUB_ENV"
+
+      - name: Leer y validar formulario
+        id: form
+        env:
+          JSON_DATA: ${{ inputs.json_data }}
+          ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          j() { jq -r "$1" <<<"$JSON_DATA"; }
+          env_name=$(j '.environment_name')
+          app_name=$(j '.app_name')
+          tech=$(j '.technology // "nodejs"')
+          ver=$(j '.tech_version // empty')
+          app_version=$(j '.app_version // "1.0.0"')
+          instance=$(j '.instance_type // "t3.micro"')
+
+          [[ "$env_name" =~ ^[a-z][a-z0-9-]{2,20}$ ]] || { echo "::error::environment_name inválido"; exit 1; }
+          [[ "$app_name" =~ ^[a-z][a-z0-9-]{1,20}$ ]] || { echo "::error::app_name inválido (minúsculas, números y guiones, 2-21 caracteres)"; exit 1; }
+
+          case "$tech" in
+            nodejs) runtime=node;   ver=${ver:-20};   default_port=3000
+                    [[ "$ver" =~ ^(18|20|22)$ ]] || { echo "::error::Versión de Node no soportada: $ver (18, 20 o 22)"; exit 1; } ;;
+            python) runtime=python; ver=${ver:-3.12}; default_port=5000
+                    [[ "$ver" =~ ^3\.(11|12|13)$ ]] || { echo "::error::Versión de Python no soportada: $ver (3.11, 3.12 o 3.13)"; exit 1; } ;;
+            *) echo "::error::technology debe ser nodejs o python"; exit 1 ;;
+          esac
+          port=$(j '.container_port // empty')
+          port=${port:-$default_port}
+          [[ "$port" =~ ^[0-9]{2,5}$ ]] || { echo "::error::container_port inválido"; exit 1; }
+
+          ENV_REPO="${ORG}/${env_name}-account-infra"
+          gh repo view "$ENV_REPO" >/dev/null 2>&1 || { echo "::error::El entorno '$env_name' no existe. Ejecuta primero el autoservicio 1."; exit 1; }
+          region=$(gh variable get AWS_REGION -R "$ENV_REPO")
+
+          {
+            echo "env_name=$env_name"; echo "app_name=$app_name"; echo "tech=$tech"; echo "runtime=$runtime"
+            echo "ver=$ver"; echo "port=$port"; echo "app_version=$app_version"; echo "instance=$instance"
+            echo "region=$region"; echo "prefix=${env_name}-${app_name}"
+            echo "role_arn=arn:aws:iam::${ACCOUNT_ID}:role/${env_name}-deploy"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+        with:
+          message: "⏳ [2/4] Creando repositorio de infraestructura de la aplicación..."
+
+      - name: Repo de infraestructura de la app
+        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/create-from-template@main
+        with:
+          template: tfm-template-terraform-app-infra
+          name: ${{ steps.form.outputs.prefix }}-infra
+          description: Infraestructura de ${{ steps.form.outputs.app_name }} en ${{ steps.form.outputs.env_name }}
+          values: >-
+            {"environment_name":"${{ steps.form.outputs.env_name }}",
+             "app_name":"${{ steps.form.outputs.app_name }}",
+             "aws_region":"${{ steps.form.outputs.region }}",
+             "container_port":"${{ steps.form.outputs.port }}",
+             "instance_type":"${{ steps.form.outputs.instance }}"}
+
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+        with:
+          message: "⏳ [2/4] Creando repositorio de la aplicación (${{ steps.form.outputs.tech }} ${{ steps.form.outputs.ver }})..."
+
+      - name: Repo de la aplicación
+        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/create-from-template@main
+        with:
+          template: tfm-template-app-${{ steps.form.outputs.tech }}
+          name: ${{ steps.form.outputs.prefix }}-app
+          description: Aplicación ${{ steps.form.outputs.app_name }} (${{ steps.form.outputs.env_name }})
+          values: >-
+            {"app_name":"${{ steps.form.outputs.app_name }}",
+             "environment_name":"${{ steps.form.outputs.env_name }}",
+             "app_version":"${{ steps.form.outputs.app_version }}",
+             "node_version":"${{ steps.form.outputs.ver }}",
+             "python_version":"${{ steps.form.outputs.ver }}",
+             "container_port":"${{ steps.form.outputs.port }}"}
+
+      - name: Configurar variables de los repositorios
+        env:
+          ORG: ${{ github.repository_owner }}
+          P: ${{ steps.form.outputs.prefix }}
+          APP: ${{ steps.form.outputs.app_name }}
+          ENV_NAME: ${{ steps.form.outputs.env_name }}
+          REGION: ${{ steps.form.outputs.region }}
+          ROLE: ${{ steps.form.outputs.role_arn }}
+          PORT_C: ${{ steps.form.outputs.port }}
+          VER: ${{ steps.form.outputs.app_version }}
+          RUNTIME: ${{ steps.form.outputs.runtime }}
+          TECH_VERSION: ${{ steps.form.outputs.ver }}
+        run: |
+          set -euo pipefail
+          setv() { gh variable set "$2" --body "$3" -R "$ORG/$1"; }
+          INFRA="$P-infra"; APPREPO="$P-app"
+          setv "$INFRA" AWS_ROLE_ARN "$ROLE"
+          setv "$INFRA" AWS_REGION "$REGION"
+          setv "$INFRA" TF_STATE_KEY "apps/$P/terraform.tfstate"
+
+          setv "$APPREPO" AWS_ROLE_ARN "$ROLE"
+          setv "$APPREPO" AWS_REGION "$REGION"
+          setv "$APPREPO" ECR_REPOSITORY "$P"
+          setv "$APPREPO" ECS_CLUSTER "$P-cluster"
+          setv "$APPREPO" ECS_SERVICE "$P-svc"
+          setv "$APPREPO" TASK_FAMILY "$P"
+          setv "$APPREPO" CONTAINER_NAME "$APP"
+          setv "$APPREPO" CONTAINER_PORT "$PORT_C"
+          setv "$APPREPO" APP_VERSION "$VER"
+          setv "$APPREPO" RUNTIME "$RUNTIME"
+          setv "$APPREPO" TECH_VERSION "$TECH_VERSION"
+          setv "$APPREPO" ENVIRONMENT_NAME "$ENV_NAME"
+
+      - name: Registrar aplicación en el catálogo de Port
+        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-upsert@main
+        with:
+          blueprint: idp_application
+          identifier: ${{ steps.form.outputs.prefix }}
+          title: ${{ steps.form.outputs.app_name }} (${{ steps.form.outputs.env_name }})
+          properties: >-
+            {"app_name":"${{ steps.form.outputs.app_name }}",
+             "environment_name":"${{ steps.form.outputs.env_name }}",
+             "technology":"${{ steps.form.outputs.tech }}",
+             "tech_version":"${{ steps.form.outputs.ver }}",
+             "app_version":"${{ steps.form.outputs.app_version }}",
+             "infra_repo":"https://github.com/${{ github.repository_owner }}/${{ steps.form.outputs.prefix }}-infra",
+             "app_repo":"https://github.com/${{ github.repository_owner }}/${{ steps.form.outputs.prefix }}-app",
+             "status":"repos_created"}
+          relations: '{"environment":"${{ steps.form.outputs.env_name }}"}'
+
+      - uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+        with:
+          message: "✅ [2/4] Repos creados: ${{ steps.form.outputs.prefix }}-infra y ${{ steps.form.outputs.prefix }}-app. Siguiente paso: desplegar la infraestructura."
+
+      - if: ${{ failure() }}
+        uses: AlejandroDiazBravoUNIR/tfm-reusable-workflows/.github/actions/port-log@main
+        with:
+          message: "❌ [2/4] Falló la creación de recursos CI/CD. Ver ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
